@@ -22,36 +22,69 @@ PATCH="$HERE/driver/0001-colorful-p15-kbd-backlight.patch"
 KVER="$(uname -r)"
 LED=/sys/class/leds/rgb:kbdlight
 
-# ---- Arch / CachyOS dependency installation ---------------------------------
-echo "==> dependencies (Arch/CachyOS)"
+# ---- OS Detection & Dependencies --------------------------------------------
+echo "==> detecting OS and dependencies"
 
-# Detect which kernel headers package to install.
-# CachyOS uses custom kernel packages like linux-cachyos, linux-cachyos-lts, etc.
-# Their headers are named linux-cachyos-headers, linux-cachyos-lts-headers, etc.
-# Standard Arch kernels: linux -> linux-headers, linux-lts -> linux-lts-headers, etc.
-HEADERS_PKG=""
-if pacman -Qi linux-cachyos &>/dev/null; then
-    HEADERS_PKG="linux-cachyos-headers"
-elif pacman -Qi linux-cachyos-lts &>/dev/null; then
-    HEADERS_PKG="linux-cachyos-lts-headers"
-elif pacman -Qi linux-cachyos-bore &>/dev/null; then
-    HEADERS_PKG="linux-cachyos-bore-headers"
-elif pacman -Qi linux-cachyos-rt &>/dev/null; then
-    HEADERS_PKG="linux-cachyos-rt-headers"
-elif pacman -Qi linux-cachyos-hardened &>/dev/null; then
-    HEADERS_PKG="linux-cachyos-hardened-headers"
-elif pacman -Qi linux-lts &>/dev/null && [[ "$KVER" == *lts* ]]; then
-    HEADERS_PKG="linux-lts-headers"
-elif pacman -Qi linux-zen &>/dev/null && [[ "$KVER" == *zen* ]]; then
-    HEADERS_PKG="linux-zen-headers"
-elif pacman -Qi linux-hardened &>/dev/null && [[ "$KVER" == *hardened* ]]; then
-    HEADERS_PKG="linux-hardened-headers"
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$ID
+    OS_LIKE=${ID_LIKE:-""}
 else
-    HEADERS_PKG="linux-headers"
+    echo "ERROR: Cannot detect OS. /etc/os-release is missing."
+    exit 1
 fi
-echo "    detected kernel headers package: $HEADERS_PKG"
 
-pacman -S --needed --noconfirm base-devel dkms git "$HEADERS_PKG"
+case "$OS" in
+    arch|cachyos|manjaro)
+        # Detect which kernel headers package to install on Arch-based systems.
+        HEADERS_PKG=""
+        if pacman -Qi linux-cachyos &>/dev/null; then
+            HEADERS_PKG="linux-cachyos-headers"
+        elif pacman -Qi linux-cachyos-lts &>/dev/null; then
+            HEADERS_PKG="linux-cachyos-lts-headers"
+        elif pacman -Qi linux-cachyos-bore &>/dev/null; then
+            HEADERS_PKG="linux-cachyos-bore-headers"
+        elif pacman -Qi linux-cachyos-rt &>/dev/null; then
+            HEADERS_PKG="linux-cachyos-rt-headers"
+        elif pacman -Qi linux-cachyos-hardened &>/dev/null; then
+            HEADERS_PKG="linux-cachyos-hardened-headers"
+        elif pacman -Qi linux-lts &>/dev/null && [[ "$KVER" == *lts* ]]; then
+            HEADERS_PKG="linux-lts-headers"
+        elif pacman -Qi linux-zen &>/dev/null && [[ "$KVER" == *zen* ]]; then
+            HEADERS_PKG="linux-zen-headers"
+        elif pacman -Qi linux-hardened &>/dev/null && [[ "$KVER" == *hardened* ]]; then
+            HEADERS_PKG="linux-hardened-headers"
+        else
+            HEADERS_PKG="linux-headers"
+        fi
+        echo "    detected Arch-based OS ($OS), kernel headers package: $HEADERS_PKG"
+        pacman -S --needed --noconfirm base-devel dkms git "$HEADERS_PKG"
+        ;;
+    ubuntu|debian|linuxmint|pop)
+        echo "    detected Debian-based OS ($OS)"
+        apt-get update -qq || true
+        apt-get install -y --no-install-recommends build-essential dkms git "linux-headers-$KVER"
+        ;;
+    fedora)
+        echo "    detected Fedora ($OS)"
+        dnf install -y make gcc "kernel-devel-$KVER" dkms git
+        ;;
+    *)
+        # Try fallback using ID_LIKE
+        if [[ "$OS_LIKE" == *"arch"* ]]; then
+            pacman -S --needed --noconfirm base-devel dkms git linux-headers
+        elif [[ "$OS_LIKE" == *"debian"* || "$OS_LIKE" == *"ubuntu"* ]]; then
+            apt-get update -qq || true
+            apt-get install -y --no-install-recommends build-essential dkms git "linux-headers-$KVER"
+        elif [[ "$OS_LIKE" == *"fedora"* ]]; then
+            dnf install -y make gcc "kernel-devel-$KVER" dkms git
+        else
+            echo "ERROR: Unsupported OS: $OS (like: $OS_LIKE). Please install dependencies manually:"
+            echo "       Requires: build-essential/base-devel, dkms, git, and linux-headers"
+            exit 1
+        fi
+        ;;
+esac
 
 # Verify kernel headers are actually present
 if [ ! -d "/lib/modules/$KVER/build" ]; then

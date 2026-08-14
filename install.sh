@@ -19,11 +19,50 @@ if [ ! -e "$LED/brightness" ]; then
     echo "         Run  sudo ./install-driver.sh  first, then re-run this. Continuing anyway..."
 fi
 
-echo "==> GUI dependencies (Arch/CachyOS)"
-pacman -S --needed --noconfirm python-gobject gtk4 libadwaita 2>/dev/null || {
-    echo "    NOTE: could not install GUI deps via pacman. Install manually:"
-    echo "          sudo pacman -S python-gobject gtk4 libadwaita"
-}
+echo "==> GUI dependencies"
+
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$ID
+    OS_LIKE=${ID_LIKE:-""}
+else
+    echo "WARNING: Cannot detect OS. /etc/os-release is missing. Skipping GUI dependencies."
+    OS="unknown"
+fi
+
+case "$OS" in
+    arch|cachyos|manjaro)
+        pacman -S --needed --noconfirm python-gobject gtk4 libadwaita 2>/dev/null || {
+            echo "    NOTE: could not install GUI deps via pacman. Install manually:"
+            echo "          sudo pacman -S python-gobject gtk4 libadwaita"
+        }
+        ;;
+    ubuntu|debian|linuxmint|pop)
+        apt-get update -qq || true
+        apt-get install -y python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 2>/dev/null || {
+            echo "    NOTE: could not install GUI deps via apt. Install manually:"
+            echo "          sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1"
+        }
+        ;;
+    fedora)
+        dnf install -y python3-gobject gtk4 libadwaita 2>/dev/null || {
+            echo "    NOTE: could not install GUI deps via dnf. Install manually:"
+            echo "          sudo dnf install python3-gobject gtk4 libadwaita"
+        }
+        ;;
+    *)
+        if [[ "$OS_LIKE" == *"arch"* ]]; then
+            pacman -S --needed --noconfirm python-gobject gtk4 libadwaita 2>/dev/null || true
+        elif [[ "$OS_LIKE" == *"debian"* || "$OS_LIKE" == *"ubuntu"* ]]; then
+            apt-get update -qq || true
+            apt-get install -y python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 2>/dev/null || true
+        elif [[ "$OS_LIKE" == *"fedora"* ]]; then
+            dnf install -y python3-gobject gtk4 libadwaita 2>/dev/null || true
+        else
+            echo "    NOTE: Unknown OS ($OS). Please ensure GTK4 and Libadwaita Python bindings are installed."
+        fi
+        ;;
+esac
 
 echo "==> binaries"
 install -m 0755 "$HERE/kbdlight"        /usr/local/bin/kbdlight
