@@ -4,6 +4,8 @@
 # makes the keyboard backlight work on COLORFUL P15 23 and similar Tongfang/Clevo
 # laptops whose firmware reports an *unrecognized* backlight type.
 #
+# Adapted for Arch Linux / CachyOS.
+#
 #   sudo ./install-driver.sh                 # auto: force 1-zone RGB only if needed
 #   sudo FORCE_TYPE=2 ./install-driver.sh    # force a specific type (2=3-zone, 6=1-zone, 243=per-key)
 #   sudo FORCE_TYPE=auto ./install-driver.sh # never force (rely on firmware detection)
@@ -20,9 +22,43 @@ PATCH="$HERE/driver/0001-colorful-p15-kbd-backlight.patch"
 KVER="$(uname -r)"
 LED=/sys/class/leds/rgb:kbdlight
 
-echo "==> dependencies"
-apt-get update -qq || true
-apt-get install -y --no-install-recommends build-essential dkms git "linux-headers-$KVER"
+# ---- Arch / CachyOS dependency installation ---------------------------------
+echo "==> dependencies (Arch/CachyOS)"
+
+# Detect which kernel headers package to install.
+# CachyOS uses custom kernel packages like linux-cachyos, linux-cachyos-lts, etc.
+# Their headers are named linux-cachyos-headers, linux-cachyos-lts-headers, etc.
+# Standard Arch kernels: linux -> linux-headers, linux-lts -> linux-lts-headers, etc.
+HEADERS_PKG=""
+if pacman -Qi linux-cachyos &>/dev/null; then
+    HEADERS_PKG="linux-cachyos-headers"
+elif pacman -Qi linux-cachyos-lts &>/dev/null; then
+    HEADERS_PKG="linux-cachyos-lts-headers"
+elif pacman -Qi linux-cachyos-bore &>/dev/null; then
+    HEADERS_PKG="linux-cachyos-bore-headers"
+elif pacman -Qi linux-cachyos-rt &>/dev/null; then
+    HEADERS_PKG="linux-cachyos-rt-headers"
+elif pacman -Qi linux-cachyos-hardened &>/dev/null; then
+    HEADERS_PKG="linux-cachyos-hardened-headers"
+elif pacman -Qi linux-lts &>/dev/null && [[ "$KVER" == *lts* ]]; then
+    HEADERS_PKG="linux-lts-headers"
+elif pacman -Qi linux-zen &>/dev/null && [[ "$KVER" == *zen* ]]; then
+    HEADERS_PKG="linux-zen-headers"
+elif pacman -Qi linux-hardened &>/dev/null && [[ "$KVER" == *hardened* ]]; then
+    HEADERS_PKG="linux-hardened-headers"
+else
+    HEADERS_PKG="linux-headers"
+fi
+echo "    detected kernel headers package: $HEADERS_PKG"
+
+pacman -S --needed --noconfirm base-devel dkms git "$HEADERS_PKG"
+
+# Verify kernel headers are actually present
+if [ ! -d "/lib/modules/$KVER/build" ]; then
+    echo "ERROR: kernel headers for $KVER not found at /lib/modules/$KVER/build"
+    echo "       install the correct headers package for your running kernel."
+    exit 1
+fi
 
 echo "==> fetch driver source (Commown fork @ ${PIN:0:7}) and apply patch"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
@@ -31,17 +67,38 @@ git -C "$WORK/src" checkout -q "$PIN"
 git -C "$WORK/src" apply "$PATCH"
 echo "    patch applied."
 
-VER="$(grep -Pom1 '.* \(\K.*(?=\) .*; urgency=.*)' "$WORK/src/debian/changelog")"
+# Extract version: try debian/changelog first, fallback to Makefile or dkms.conf
+VER=""
+if [ -f "$WORK/src/debian/changelog" ]; then
+    VER="$(grep -Pom1 '.* \(\K.*(?=\) .*; urgency=.*)' "$WORK/src/debian/changelog" 2>/dev/null || true)"
+fi
+if [ -z "$VER" ] && [ -f "$WORK/src/dkms.conf" ]; then
+    VER="$(grep -Po 'PACKAGE_VERSION="\K[^"]+' "$WORK/src/dkms.conf" 2>/dev/null || true)"
+fi
+if [ -z "$VER" ]; then
+    VER="0.0.1-custom"
+    echo "    WARNING: could not detect version, using $VER"
+fi
 echo "    driver version: $VER"
+
+# Detect if kernel was built with LLVM/Clang (common in CachyOS)
+MAKE_OPTS=""
+if grep -qi "clang version" /proc/version; then
+    echo "    kernel built with clang, using LLVM=1 for build"
+    MAKE_OPTS="LLVM=1"
+fi
 
 echo "==> enumerate modules and generate dkms.conf"
 # NB: this repo's Makefile uses M=$(PWD), so build from *inside* the dir
 # (`make -C dir` would leave $(PWD) wrong and fail).
-( cd "$WORK/src" && make ) >/dev/null 2>&1
+( cd "$WORK/src" && make $MAKE_OPTS ) >/dev/null 2>&1
 {
   echo 'PACKAGE_NAME="tuxedo-drivers"'
   echo "PACKAGE_VERSION=\"$VER\""
   echo 'AUTOINSTALL="yes"'
+  if [ -n "$MAKE_OPTS" ]; then
+      echo "MAKE[0]=\"make $MAKE_OPTS\""
+  fi
   echo ''
   i=0
   for ko in $(cd "$WORK/src" && find src -name '*.ko' | sort); do
@@ -52,7 +109,7 @@ echo "==> enumerate modules and generate dkms.conf"
     i=$((i+1))
   done
 } > "$WORK/src/dkms.conf"
-( cd "$WORK/src" && make clean ) >/dev/null 2>&1
+( cd "$WORK/src" && make $MAKE_OPTS clean ) >/dev/null 2>&1
 
 echo "==> install via DKMS"
 DEST="/usr/src/tuxedo-drivers-$VER"

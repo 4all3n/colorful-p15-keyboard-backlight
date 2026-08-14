@@ -3,6 +3,7 @@
 # install.sh — install the kbdlight tool, udev rule and boot/resume restore.
 # Run with sudo:  sudo ./install.sh
 #
+# Adapted for Arch Linux / CachyOS.
 # Assumes the tuxedo_keyboard driver is already installed via DKMS (see README).
 #
 set -euo pipefail
@@ -17,6 +18,12 @@ if [ ! -e "$LED/brightness" ]; then
     echo "WARNING: $LED not found — the driver isn't set up yet."
     echo "         Run  sudo ./install-driver.sh  first, then re-run this. Continuing anyway..."
 fi
+
+echo "==> GUI dependencies (Arch/CachyOS)"
+pacman -S --needed --noconfirm python-gobject gtk4 libadwaita 2>/dev/null || {
+    echo "    NOTE: could not install GUI deps via pacman. Install manually:"
+    echo "          sudo pacman -S python-gobject gtk4 libadwaita"
+}
 
 echo "==> binaries"
 install -m 0755 "$HERE/kbdlight"        /usr/local/bin/kbdlight
