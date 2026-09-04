@@ -9,8 +9,9 @@
 #   sudo ./install-driver.sh                 # auto: force 1-zone RGB only if needed
 #   sudo FORCE_TYPE=2 ./install-driver.sh    # force a specific type (2=3-zone, 6=1-zone, 243=per-key)
 #   sudo FORCE_TYPE=auto ./install-driver.sh # never force (rely on firmware detection)
+#   sudo KVER=7.2.2-1-cachyos ./install-driver.sh  # build for a specific kernel
 #
-# Installs via DKMS, so it survives kernel updates.
+# Installs via DKMS, so it survives kernel updates automatically.
 #
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -19,8 +20,32 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="https://gitlab.com/commown/tuxedo-drivers"
 PIN="4e1fb3a8897708676ba76603f15e20ce7e9ad5fe"   # commit this patch + dkms layout match
 PATCH="$HERE/driver/0001-colorful-p15-kbd-backlight.patch"
-KVER="$(uname -r)"
 LED=/sys/class/leds/rgb:kbdlight
+
+# ---- kernel version detection -----------------------------------------------
+# Use KVER env-var if set; otherwise prefer the running kernel if its headers
+# are present; as a last resort pick the newest installed kernel that has headers
+# (handles the common case of "pacman updated the kernel but I haven't rebooted").
+if [ -n "${KVER:-}" ]; then
+    echo "==> using user-specified kernel: $KVER"
+elif [ -d "/lib/modules/$(uname -r)/build" ]; then
+    KVER="$(uname -r)"
+else
+    echo "NOTE: headers for running kernel $(uname -r) not found (kernel updated but not yet rebooted?)."
+    KVER=""
+    for d in /lib/modules/*/build; do
+        [ -d "$d" ] || continue
+        KVER="$(basename "$(dirname "$d")")"
+    done
+    if [ -n "$KVER" ]; then
+        echo "    → found headers for $KVER — building for that kernel."
+        echo "    → reboot into the new kernel after this finishes."
+    else
+        echo "ERROR: no kernel headers found under /lib/modules/*/build."
+        echo "       Install the correct headers package for your kernel."
+        exit 1
+    fi
+fi
 
 # ---- Arch / CachyOS dependency installation ---------------------------------
 echo "==> dependencies (Arch/CachyOS)"
@@ -81,23 +106,33 @@ if [ -z "$VER" ]; then
 fi
 echo "    driver version: $VER"
 
-# Detect if kernel was built with LLVM/Clang (common in CachyOS)
+# Detect if target kernel was built with LLVM/Clang (common in CachyOS)
 MAKE_OPTS=""
-if grep -qi "clang version" /proc/version; then
-    echo "    kernel built with clang, using LLVM=1 for build"
+if [ -f "/lib/modules/$KVER/build/.config" ] \
+   && grep -q 'CONFIG_CC_IS_CLANG=y' "/lib/modules/$KVER/build/.config" 2>/dev/null; then
+    echo "    target kernel ($KVER) built with clang — using LLVM=1"
+    MAKE_OPTS="LLVM=1"
+elif grep -qi "clang version" /proc/version 2>/dev/null; then
+    echo "    running kernel built with clang — using LLVM=1"
     MAKE_OPTS="LLVM=1"
 fi
 
 echo "==> enumerate modules and generate dkms.conf"
 # NB: this repo's Makefile uses M=$(PWD), so build from *inside* the dir
 # (`make -C dir` would leave $(PWD) wrong and fail).
-( cd "$WORK/src" && make $MAKE_OPTS ) >/dev/null 2>&1
+# Pass KDIR explicitly so the build works even when uname -r ≠ target kernel.
+( cd "$WORK/src" && make $MAKE_OPTS KDIR="/lib/modules/$KVER/build" ) >/dev/null 2>&1
 {
   echo 'PACKAGE_NAME="tuxedo-drivers"'
   echo "PACKAGE_VERSION=\"$VER\""
   echo 'AUTOINSTALL="yes"'
+  # ${kernelver} is a DKMS magic variable: it always resolves to the kernel
+  # being built for (not the currently running one).  This is what makes
+  # auto-rebuild on kernel updates actually work.
   if [ -n "$MAKE_OPTS" ]; then
-      echo "MAKE[0]=\"make $MAKE_OPTS\""
+      echo "MAKE[0]=\"make KDIR=/lib/modules/\${kernelver}/build $MAKE_OPTS\""
+  else
+      echo 'MAKE[0]="make KDIR=/lib/modules/${kernelver}/build"'
   fi
   echo ''
   i=0
@@ -109,14 +144,14 @@ echo "==> enumerate modules and generate dkms.conf"
     i=$((i+1))
   done
 } > "$WORK/src/dkms.conf"
-( cd "$WORK/src" && make $MAKE_OPTS clean ) >/dev/null 2>&1
+( cd "$WORK/src" && make $MAKE_OPTS KDIR="/lib/modules/$KVER/build" clean ) >/dev/null 2>&1
 
 echo "==> install via DKMS"
 DEST="/usr/src/tuxedo-drivers-$VER"
 dkms remove -m tuxedo-drivers -v "$VER" --all >/dev/null 2>&1 || true
 rm -rf "$DEST"; cp -r "$WORK/src" "$DEST"
 dkms add    -m tuxedo-drivers -v "$VER" >/dev/null
-dkms install -m tuxedo-drivers -v "$VER" --force >/dev/null
+dkms install -m tuxedo-drivers -v "$VER" -k "$KVER" --force >/dev/null
 echo "    $(dkms status tuxedo-drivers | tail -1)"
 
 # --- figure out the backlight type the firmware reports -----------------------
