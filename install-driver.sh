@@ -19,7 +19,6 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 REPO="https://gitlab.com/commown/tuxedo-drivers"
 PIN="4e1fb3a8897708676ba76603f15e20ce7e9ad5fe"   # commit this patch + dkms layout match
-PATCH="$HERE/driver/0001-colorful-p15-kbd-backlight.patch"
 LED=/sys/class/leds/rgb:kbdlight
 
 # ---- kernel version detection -----------------------------------------------
@@ -85,12 +84,15 @@ if [ ! -d "/lib/modules/$KVER/build" ]; then
     exit 1
 fi
 
-echo "==> fetch driver source (Commown fork @ ${PIN:0:7}) and apply patch"
+echo "==> fetch driver source (Commown fork @ ${PIN:0:7}) and apply patches"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 git clone -q "$REPO" "$WORK/src"
 git -C "$WORK/src" checkout -q "$PIN"
-git -C "$WORK/src" apply "$PATCH"
-echo "    patch applied."
+for p in "$HERE/driver"/*.patch; do
+    [ -f "$p" ] || continue
+    git -C "$WORK/src" apply "$p"
+    echo "    applied $(basename "$p")"
+done
 
 # Extract version: try debian/changelog first, fallback to Makefile or dkms.conf
 VER=""
@@ -108,11 +110,12 @@ echo "    driver version: $VER"
 
 # Detect if target kernel was built with LLVM/Clang (common in CachyOS)
 MAKE_OPTS=""
-if [ -f "/lib/modules/$KVER/build/.config" ] \
-   && grep -q 'CONFIG_CC_IS_CLANG=y' "/lib/modules/$KVER/build/.config" 2>/dev/null; then
-    echo "    target kernel ($KVER) built with clang — using LLVM=1"
-    MAKE_OPTS="LLVM=1"
-elif grep -qi "clang version" /proc/version 2>/dev/null; then
+if [ -f "/lib/modules/$KVER/build/.config" ]; then
+    if grep -q 'CONFIG_CC_IS_CLANG=y' "/lib/modules/$KVER/build/.config" 2>/dev/null; then
+        echo "    target kernel ($KVER) built with clang — using LLVM=1"
+        MAKE_OPTS="LLVM=1"
+    fi
+elif [ "$KVER" = "$(uname -r)" ] && grep -qi "clang version" /proc/version 2>/dev/null; then
     echo "    running kernel built with clang — using LLVM=1"
     MAKE_OPTS="LLVM=1"
 fi
@@ -127,13 +130,9 @@ echo "==> enumerate modules and generate dkms.conf"
   echo "PACKAGE_VERSION=\"$VER\""
   echo 'AUTOINSTALL="yes"'
   # ${kernelver} is a DKMS magic variable: it always resolves to the kernel
-  # being built for (not the currently running one).  This is what makes
-  # auto-rebuild on kernel updates actually work.
-  if [ -n "$MAKE_OPTS" ]; then
-      echo "MAKE[0]=\"make KDIR=/lib/modules/\${kernelver}/build $MAKE_OPTS\""
-  else
-      echo 'MAKE[0]="make KDIR=/lib/modules/${kernelver}/build"'
-  fi
+  # being built for (not the currently running one).
+  # Dynamically evaluate LLVM=1 so Clang kernels get LLVM=1 and GCC kernels do not.
+  echo 'MAKE[0]="make KDIR=/lib/modules/${kernelver}/build $(grep -q CONFIG_CC_IS_CLANG=y /lib/modules/${kernelver}/build/.config 2>/dev/null && echo LLVM=1)"'
   echo ''
   i=0
   for ko in $(cd "$WORK/src" && find src -name '*.ko' | sort); do
@@ -151,7 +150,10 @@ DEST="/usr/src/tuxedo-drivers-$VER"
 dkms remove -m tuxedo-drivers -v "$VER" --all >/dev/null 2>&1 || true
 rm -rf "$DEST"; cp -r "$WORK/src" "$DEST"
 dkms add    -m tuxedo-drivers -v "$VER" >/dev/null
-dkms install -m tuxedo-drivers -v "$VER" -k "$KVER" --force >/dev/null
+if ! dkms install -m tuxedo-drivers -v "$VER" -k "$KVER" --force; then
+    echo "ERROR: DKMS install failed for kernel $KVER"
+    exit 1
+fi
 echo "    $(dkms status tuxedo-drivers | tail -1)"
 
 # --- figure out the backlight type the firmware reports -----------------------

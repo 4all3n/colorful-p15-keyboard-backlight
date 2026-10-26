@@ -1,0 +1,473 @@
+diff --git a/src/clevo_acpi.c b/src/clevo_acpi.c
+index 20feb19..13467a5 100644
+--- a/src/clevo_acpi.c
++++ b/src/clevo_acpi.c
+@@ -22,22 +22,27 @@
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/acpi.h>
++#include <linux/platform_device.h>
+ #include <linux/version.h>
+ #include "clevo_interfaces.h"
+ 
+ #define DRIVER_NAME			"clevo_acpi"
+ 
+ struct clevo_acpi_driver_data_t {
++#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0)
+ 	struct acpi_device *adev;
++#else
++	struct device *dev;
++	acpi_handle handle;
++#endif
+ 	struct clevo_interface_t *clevo_interface;
+ };
+ 
+ static struct clevo_acpi_driver_data_t *active_driver_data = NULL;
+ 
+-static int clevo_acpi_evaluate(struct acpi_device *device, u8 cmd, u32 arg, union acpi_object **result)
++static int clevo_acpi_evaluate_handle(acpi_handle handle, u8 cmd, u32 arg, union acpi_object **result)
+ {
+ 	int status;
+-	acpi_handle handle;
+ 	u64 dsm_rev_dummy = 0x00; // Dummy 0 value since not used
+ 	u64 dsm_func = cmd;
+ 	union acpi_object *out_obj;
+@@ -62,7 +67,6 @@ static int clevo_acpi_evaluate(struct acpi_device *device, u8 cmd, u32 arg, unio
+ 	if (status < 0)
+ 		return -ENOENT;
+ 
+-	handle = acpi_device_handle(device);
+ 	if (handle == NULL)
+ 		return -ENODEV;
+ 
+@@ -80,10 +84,9 @@ static int clevo_acpi_evaluate(struct acpi_device *device, u8 cmd, u32 arg, unio
+ 	return status;
+ }
+ 
+-static int clevo_acpi_evaluate_pkgbuf(struct acpi_device *device, u8 cmd, u8 *arg, u32 length, union acpi_object **result)
++static int clevo_acpi_evaluate_pkgbuf_handle(acpi_handle handle, u8 cmd, u8 *arg, u32 length, union acpi_object **result)
+ {
+ 	int status;
+-	acpi_handle handle;
+ 	u64 dsm_rev_dummy = 0x00; // Dummy 0 value since not used
+ 	u64 dsm_func = cmd;
+ 
+@@ -102,14 +105,12 @@ static int clevo_acpi_evaluate_pkgbuf(struct acpi_device *device, u8 cmd, u8 *ar
+ 	};
+ 
+ 	union acpi_object *out_obj;
+-
+ 	guid_t clevo_acpi_dsm_uuid;
+ 
+ 	status = guid_parse(CLEVO_ACPI_DSM_UUID, &clevo_acpi_dsm_uuid);
+ 	if (status < 0)
+ 		return -ENOENT;
+ 
+-	handle = acpi_device_handle(device);
+ 	if (handle == NULL)
+ 		return -ENODEV;
+ 
+@@ -127,18 +128,29 @@ static int clevo_acpi_evaluate_pkgbuf(struct acpi_device *device, u8 cmd, u8 *ar
+ 	return status;
+ }
+ 
++static inline acpi_handle clevo_acpi_get_handle(void)
++{
++	if (!active_driver_data)
++		return NULL;
++#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0)
++	return acpi_device_handle(active_driver_data->adev);
++#else
++	return active_driver_data->handle;
++#endif
++}
++
+ static int clevo_acpi_interface_method_call(u8 cmd, u32 arg, union acpi_object **result_value)
+ {
+ 	int status = 0;
++	acpi_handle handle = clevo_acpi_get_handle();
+ 
+-	if (!IS_ERR_OR_NULL(active_driver_data)) {
+-		status = clevo_acpi_evaluate(active_driver_data->adev, cmd, arg, result_value);
++	if (handle) {
++		status = clevo_acpi_evaluate_handle(handle, cmd, arg, result_value);
+ 	} else {
+ 		pr_err("acpi method call exec, no driver data found\n");
+ 		pr_err("..for method_call: %0#4x arg: %0#10x\n", cmd, arg);
+ 		status = -ENODATA;
+ 	}
+-	// pr_debug("clevo_acpi method_call: %0#4x arg: %0#10x result: %0#10x\n", cmd, arg, !IS_ERR_OR_NULL(result_value) ? *result_value : 0);
+ 
+ 	return status;
+ }
+@@ -146,9 +158,10 @@ static int clevo_acpi_interface_method_call(u8 cmd, u32 arg, union acpi_object *
+ static int clevo_acpi_interface_method_call_pkgbuf(u8 cmd, u8 *arg, u32 length, union acpi_object **result_value)
+ {
+ 	int status = 0;
++	acpi_handle handle = clevo_acpi_get_handle();
+ 
+-	if (!IS_ERR_OR_NULL(active_driver_data)) {
+-		status = clevo_acpi_evaluate_pkgbuf(active_driver_data->adev, cmd, arg, length, result_value);
++	if (handle) {
++		status = clevo_acpi_evaluate_pkgbuf_handle(handle, cmd, arg, length, result_value);
+ 	} else {
+ 		pr_err("acpi method call exec, no driver data found\n");
+ 		pr_err("..for method_call: %0#2x\n", cmd);
+@@ -164,6 +177,51 @@ struct clevo_interface_t clevo_acpi_interface = {
+ 	.method_call_pkgbuf = clevo_acpi_interface_method_call_pkgbuf,
+ };
+ 
++static void clevo_acpi_handle_notify_event(acpi_handle handle, u32 event)
++{
++	u32 event_value = 0;
++	union acpi_object *out_obj;
++	int status;
++
++	status = clevo_acpi_evaluate_handle(handle, 0x01, 0, &out_obj);
++	if (!status) {
++		if (out_obj->type == ACPI_TYPE_INTEGER) {
++			event_value = (u32)out_obj->integer.value;
++		} else {
++			pr_err("return type not integer, use clevo_evaluate_method2\n");
++		}
++		ACPI_FREE(out_obj);
++	}
++	pr_debug("clevo_acpi event: %0#6x, clevo event value: %0#6x\n", event, event_value);
++
++	if (!IS_ERR_OR_NULL(clevo_acpi_interface.event_callb)) {
++		clevo_acpi_interface.event_callb(event);
++	}
++}
++
++#ifdef CONFIG_PM
++static int driver_suspend_callb(struct device *dev)
++{
++	pr_debug("driver suspend\n");
++	return 0;
++}
++
++static int driver_resume_callb(struct device *dev)
++{
++	pr_debug("driver resume\n");
++	return 0;
++}
++
++static SIMPLE_DEV_PM_OPS(clevo_driver_pm_ops, driver_suspend_callb, driver_resume_callb);
++#endif
++
++static const struct acpi_device_id clevo_acpi_device_ids[] = {
++	{CLEVO_ACPI_RESOURCE_HID, 0},
++	{"", 0}
++};
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0)
++
+ static int clevo_acpi_add(struct acpi_device *device)
+ {
+ 	struct clevo_acpi_driver_data_t *driver_data;
+@@ -203,50 +261,9 @@ static void clevo_acpi_remove(struct acpi_device *device)
+ 
+ static void clevo_acpi_notify(struct acpi_device *device, u32 event)
+ {
+-	u32 event_value;
+-	union acpi_object *out_obj;
+-	int status;
+-	// struct clevo_acpi_driver_data_t *clevo_acpi_driver_data;
+-
+-	status = clevo_acpi_evaluate(device, 0x01, 0, &out_obj);
+-	if (!status) {
+-			if (out_obj->type == ACPI_TYPE_INTEGER) {
+-				event_value = (u32)out_obj->integer.value;
+-			} else {
+-				pr_err("return type not integer, use clevo_evaluate_method2\n");
+-			}
+-			ACPI_FREE(out_obj);
+-	}
+-	pr_debug("clevo_acpi event: %0#6x, clevo event value: %0#6x\n", event, event_value);
+-
+-	// clevo_acpi_driver_data = container_of(&device, struct clevo_acpi_driver_data_t, adev);
+-	if (!IS_ERR_OR_NULL(clevo_acpi_interface.event_callb)) {
+-		// Execute registered callback
+-		clevo_acpi_interface.event_callb(event);
+-	}
+-}
+-
+-#ifdef CONFIG_PM
+-static int driver_suspend_callb(struct device *dev)
+-{
+-	pr_debug("driver suspend\n");
+-	return 0;
++	clevo_acpi_handle_notify_event(acpi_device_handle(device), event);
+ }
+ 
+-static int driver_resume_callb(struct device *dev)
+-{
+-	pr_debug("driver resume\n");
+-	return 0;
+-}
+-
+-static SIMPLE_DEV_PM_OPS(clevo_driver_pm_ops, driver_suspend_callb, driver_resume_callb);
+-#endif
+-
+-static const struct acpi_device_id clevo_acpi_device_ids[] = {
+-	{CLEVO_ACPI_RESOURCE_HID, 0},
+-	{"", 0}
+-};
+-
+ static struct acpi_driver clevo_acpi_driver = {
+ 	.name = DRIVER_NAME,
+ 	.class = DRIVER_NAME,
+@@ -267,6 +284,66 @@ static struct acpi_driver clevo_acpi_driver = {
+ 
+ module_acpi_driver(clevo_acpi_driver);
+ 
++#else /* LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0) */
++
++static void clevo_acpi_notify_handler(acpi_handle device, u32 value, void *context)
++{
++	clevo_acpi_handle_notify_event(device, value);
++}
++
++static int clevo_acpi_probe(struct platform_device *pdev)
++{
++	struct clevo_acpi_driver_data_t *driver_data;
++	acpi_handle handle = ACPI_HANDLE(&pdev->dev);
++	int status;
++
++	if (!handle)
++		return -ENODEV;
++
++	driver_data = devm_kzalloc(&pdev->dev, sizeof(*driver_data), GFP_KERNEL);
++	if (!driver_data)
++		return -ENOMEM;
++
++	driver_data->dev = &pdev->dev;
++	driver_data->handle = handle;
++	driver_data->clevo_interface = &clevo_acpi_interface;
++	active_driver_data = driver_data;
++
++	pr_debug("clevo_acpi driver probe\n");
++	clevo_keyboard_add_interface(&clevo_acpi_interface);
++
++	status = devm_acpi_install_notify_handler(&pdev->dev, ACPI_ALL_NOTIFY,
++						 clevo_acpi_notify_handler, driver_data);
++	if (status)
++		pr_warn("clevo_acpi: failed to install notify handler: %d\n", status);
++
++	pr_info("interface initialized\n");
++	return 0;
++}
++
++static void clevo_acpi_remove(struct platform_device *pdev)
++{
++	pr_debug("clevo_acpi driver remove\n");
++	clevo_keyboard_remove_interface(&clevo_acpi_interface);
++	active_driver_data = NULL;
++}
++
++static struct platform_driver clevo_acpi_platform_driver = {
++	.probe = clevo_acpi_probe,
++	.remove = clevo_acpi_remove,
++	.driver = {
++		.name = DRIVER_NAME,
++		.acpi_match_table = clevo_acpi_device_ids,
++#ifdef CONFIG_PM
++		.pm = &clevo_driver_pm_ops,
++#endif
++	},
++};
++
++module_platform_driver(clevo_acpi_platform_driver);
++
++#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0) */
++
+ MODULE_AUTHOR("TUXEDO Computers GmbH <tux@tuxedocomputers.com>");
+ MODULE_DESCRIPTION("Driver for Clevo ACPI interface");
+ MODULE_LICENSE("GPL");
+diff --git a/src/gxtp7380/gxtp7380.c b/src/gxtp7380/gxtp7380.c
+index 0dadbeb..c480491 100644
+--- a/src/gxtp7380/gxtp7380.c
++++ b/src/gxtp7380/gxtp7380.c
+@@ -22,10 +22,18 @@
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/acpi.h>
++#include <linux/platform_device.h>
+ #include <linux/version.h>
+ 
+ #define DRIVER_NAME "gxtp7380"
+ 
++static const struct acpi_device_id gxtp7380_device_ids[] = {
++	{ "GXTP7380", 0 },
++	{ "", 0 }
++};
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0)
++
+ static int gxtp7380_add(struct acpi_device *device)
+ {
+ 	kobject_uevent(&device->dev.kobj, KOBJ_ADD);
+@@ -49,11 +57,6 @@ static void gxtp7380_notify(struct acpi_device *device, u32 event)
+ 	kobject_uevent(&device->dev.kobj, KOBJ_CHANGE);
+ }
+ 
+-static const struct acpi_device_id gxtp7380_device_ids[] = {
+-	{ "GXTP7380", 0 },
+-	{ "", 0 }
+-};
+-
+ static struct acpi_driver gxtp7380_driver = {
+ 	.name = DRIVER_NAME,
+ 	.class = DRIVER_NAME,
+@@ -68,6 +71,40 @@ static struct acpi_driver gxtp7380_driver = {
+ 
+ module_acpi_driver(gxtp7380_driver);
+ 
++#else /* LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0) */
++
++static void gxtp7380_notify_handler(acpi_handle device, u32 value, void *context)
++{
++	struct device *dev = context;
++	kobject_uevent(&dev->kobj, KOBJ_CHANGE);
++}
++
++static int gxtp7380_probe(struct platform_device *pdev)
++{
++	kobject_uevent(&pdev->dev.kobj, KOBJ_ADD);
++	devm_acpi_install_notify_handler(&pdev->dev, ACPI_ALL_NOTIFY,
++					 gxtp7380_notify_handler, &pdev->dev);
++	return 0;
++}
++
++static void gxtp7380_remove(struct platform_device *pdev)
++{
++	kobject_uevent(&pdev->dev.kobj, KOBJ_REMOVE);
++}
++
++static struct platform_driver gxtp7380_driver = {
++	.probe = gxtp7380_probe,
++	.remove = gxtp7380_remove,
++	.driver = {
++		.name = DRIVER_NAME,
++		.acpi_match_table = gxtp7380_device_ids,
++	},
++};
++
++module_platform_driver(gxtp7380_driver);
++
++#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0) */
++
+ MODULE_AUTHOR("TUXEDO Computers GmbH <tux@tuxedocomputers.com>");
+ MODULE_DESCRIPTION("Touch panel disable, notify driver");
+ MODULE_LICENSE("GPL");
+diff --git a/src/tuxedo_tuxi/tuxi_acpi.c b/src/tuxedo_tuxi/tuxi_acpi.c
+index e7d72b8..056b785 100644
+--- a/src/tuxedo_tuxi/tuxi_acpi.c
++++ b/src/tuxedo_tuxi/tuxi_acpi.c
+@@ -276,6 +276,9 @@ int tuxi_get_fan_rpm(u8 index, u16 *rpm)
+ }
+ EXPORT_SYMBOL(tuxi_get_fan_rpm);
+ 
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0)
++
+ static int get_tfan(struct acpi_device *tuxi_dev, acpi_handle *tfan_handle)
+ {
+ 	acpi_status status;
+@@ -371,6 +374,96 @@ static struct acpi_driver tuxi_acpi_driver = {
+ 
+ module_acpi_driver(tuxi_acpi_driver);
+ 
++#else /* LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0) */
++
++#include <linux/platform_device.h>
++
++static int get_tfan(acpi_handle handle, acpi_handle *tfan_handle)
++{
++	acpi_status status;
++	status = acpi_get_handle(handle, "TFAN", tfan_handle);
++	if (ACPI_FAILURE(status))
++		return -ENODEV;
++	return 0;
++}
++
++#ifdef CONFIG_PM
++static int driver_suspend_callb(struct device *dev)
++{
++	pr_debug("driver suspend\n");
++	return 0;
++}
++
++static int driver_resume_callb(struct device *dev)
++{
++	pr_debug("driver resume\n");
++	return 0;
++}
++
++static SIMPLE_DEV_PM_OPS(tuxi_driver_pm_ops, driver_suspend_callb, driver_resume_callb);
++#endif
++
++static const struct acpi_device_id tuxi_acpi_device_ids[] = {
++	{ TUXI_ACPI_RESOURCE_HID, 0 },
++	{ "", 0 }
++};
++
++static void tuxi_acpi_notify_handler(acpi_handle device, u32 value, void *context)
++{
++	pr_debug("event: %d\n", value);
++}
++
++static int tuxi_acpi_probe(struct platform_device *pdev)
++{
++	struct tuxi_acpi_driver_data_t *driver_data;
++	acpi_handle handle = ACPI_HANDLE(&pdev->dev);
++	int err;
++
++	if (!handle)
++		return -ENODEV;
++
++	driver_data = devm_kzalloc(&pdev->dev, sizeof(*driver_data), GFP_KERNEL);
++	if (!driver_data)
++		return -ENOMEM;
++
++	err = get_tfan(handle, &driver_data->tfan_handle);
++	if (err)
++		driver_data->tfan_handle = NULL;
++
++	if (!driver_data->tfan_handle)
++		pr_info("no interface found\n");
++
++	tuxi_driver_data = driver_data;
++
++	devm_acpi_install_notify_handler(&pdev->dev, ACPI_ALL_NOTIFY,
++					 tuxi_acpi_notify_handler, driver_data);
++
++	pr_info("interface initialized\n");
++	return 0;
++}
++
++static void tuxi_acpi_remove(struct platform_device *pdev)
++{
++	tuxi_driver_data = NULL;
++	pr_debug("driver remove\n");
++}
++
++static struct platform_driver tuxi_acpi_driver = {
++	.probe = tuxi_acpi_probe,
++	.remove = tuxi_acpi_remove,
++	.driver = {
++		.name = DRIVER_NAME,
++		.acpi_match_table = tuxi_acpi_device_ids,
++#ifdef CONFIG_PM
++		.pm = &tuxi_driver_pm_ops,
++#endif
++	},
++};
++
++module_platform_driver(tuxi_acpi_driver);
++
++#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0) */
++
+ MODULE_AUTHOR("TUXEDO Computers GmbH <tux@tuxedocomputers.com>");
+ MODULE_DESCRIPTION("Driver for TUXEDO ACPI interface");
+ MODULE_LICENSE("GPL");

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """
 kbdlight-gui — a small GTK4/Adwaita app to control the keyboard backlight
 on the COLORFUL P15 23 (tuxedo_keyboard, /sys/class/leds/rgb:kbdlight).
