@@ -48,11 +48,10 @@ get the **full 0–255 RGB range**.
 
 ## Install (from scratch)
 
-Tested on **Ubuntu 24.04 / kernel 6.17**. Needs internet (to fetch the driver
-source) and `sudo`.
+Tested on **Arch Linux / CachyOS** and **Ubuntu/Debian**, across **Linux kernels 6.x through 7.3+** (including both GCC and Clang/LLVM-compiled kernels). Needs internet (to fetch the driver source) and `sudo`.
 
 ```bash
-git clone https://github.com/JAmanOG/colorful-p15-keyboard-backlight
+git clone https://github.com/4all3n/colorful-p15-keyboard-backlight
 cd colorful-p15-keyboard-backlight
 
 sudo ./install-driver.sh     # build + DKMS-install the patched driver, set up autoload
@@ -61,13 +60,16 @@ sudo ./install.sh            # install the kbdlight CLI + GUI + udev + restore s
 
 `install-driver.sh` auto-detects your backlight type. If the firmware reports a
 **recognized** type it changes nothing; if it reports an **unknown** type (like
-`0x26`) it forces 1-zone RGB. To force a specific layout:
+`0x26`) it forces 1-zone RGB. To force a specific layout or target a specific kernel:
 
 ```bash
 sudo FORCE_TYPE=2   ./install-driver.sh   # 3-zone RGB
 sudo FORCE_TYPE=243 ./install-driver.sh   # per-key RGB
 sudo FORCE_TYPE=auto ./install-driver.sh  # never force (trust firmware)
+sudo KVER=7.3.0-4-cachyos ./install-driver.sh  # build for a specific installed kernel
 ```
+
+If you just updated your kernel packages with `pacman` or `apt` but haven't rebooted yet, `install-driver.sh` automatically detects the newly installed kernel headers and builds for the new kernel so everything is ready when you reboot.
 
 The `Fn` keys (`Fn`+`*` / `Fn`+`+/-`) work immediately via the `kbdlight-keys`
 listener service. There is intentionally **no GNOME system-menu slider**: the LED
@@ -110,6 +112,15 @@ The `Fn` keys also work once installed.
    lock / suspend / resume** — overriding your setting (the "turns itself on at
    full intensity" bug). Renaming it out of that namespace gives this project
    sole control (GUI / CLI / `Fn` keys) and stops the override for good.
+5. **Modern kernel support (Linux 7.3+)**: In Linux 7.3, kernel developers
+   eliminated the legacy `struct acpi_driver` subsystem. The patch
+   (`driver/0002-linux-7.3-acpi-compatibility.patch`) modernizes `clevo_acpi` (and
+   related modules) to use `platform_driver` and `devm_acpi_install_notify_handler`,
+   while retaining backward compatibility for kernels < 7.3 (such as 6.18 LTS).
+6. **DKMS compiler auto-detection**: The generated `dkms.conf` dynamically checks
+   the target kernel's `.config` for `CONFIG_CC_IS_CLANG=y`. When building for
+   Clang-compiled kernels (like CachyOS), it passes `LLVM=1`; when building for GCC
+   kernels (like standard Arch/Ubuntu or CachyOS LTS), it builds cleanly with GCC.
 
 ### Find your own backlight type
 If `install-driver.sh` can't get the light working, see what your firmware
@@ -133,6 +144,13 @@ sudo dkms autoinstall
 sudo modprobe clevo_acpi clevo_wmi
 ls /sys/class/leds/rgb:kbdlight
 ```
+
+**GUI fails to open / "No module named 'gi'"** — The GUI requires system GTK4 / GObject packages (`python-gobject`, `gtk4`, `libadwaita`). The scripts explicitly point to `/usr/bin/python3` so active Conda or virtual environments do not shadow system libraries. If you installed an earlier version of this repo, re-run:
+```bash
+sudo ./install.sh
+```
+
+**"kernel headers ... not found"** — If you updated your system's kernel packages but have not rebooted yet, `uname -r` reports the older running kernel while headers only exist for the new one. `install-driver.sh` automatically detects the newer headers and builds for the new kernel; simply reboot into the new kernel once it finishes.
 
 **`Fn` keys do nothing** — check the listener service:
 ```bash
@@ -172,7 +190,8 @@ uninstall.sh
 kbdlight            CLI
 kbdlight-gui.py     GTK4/Adwaita GUI
 kbdlight-listen     Fn-key listener (maps KBDILLUM keys -> kbdlight)
-driver/0001-colorful-p15-kbd-backlight.patch   driver fix: force-type param + LED rename
+driver/0001-colorful-p15-kbd-backlight.patch         driver fix: force-type param + LED rename
+driver/0002-linux-7.3-acpi-compatibility.patch       kernel 7.3+ modern platform_driver + legacy fallback
 data/               udev rule, .desktop, systemd units (restore, resume, keys)
 ```
 
